@@ -1,10 +1,15 @@
 import os
+import requests
+
 from flask import Flask, request, jsonify
 from openai import OpenAI
 
 app = Flask(__name__)
 
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
 
@@ -13,10 +18,9 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 @app.route("/", methods=["GET"])
 def home():
-    return "WhatsApp AI Analysis Agent is running", 200
+    return "WhatsApp AI Agent is running", 200
 
 
-# Meta webhook verification
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
     mode = request.args.get("hub.mode")
@@ -102,6 +106,71 @@ Important rules:
     return response.output_text
 
 
+def generate_customer_reply(text):
+    prompt = f"""
+You are the WhatsApp customer service assistant for Violetta Laundry in Lebanon.
+
+Customer message:
+{text}
+
+Write a short, friendly WhatsApp reply.
+
+Rules:
+- Reply in the same language as the customer.
+- Be concise and natural.
+- Do not invent prices, schedules, delivery areas, or services.
+- If information is missing, ask a short follow-up question.
+- If the customer only says hello, greet them and ask how you can help.
+- Do not mention that you are an AI.
+"""
+
+    response = client.responses.create(
+        model=OPENAI_MODEL,
+        input=prompt
+    )
+
+    return response.output_text
+
+
+def send_whatsapp_message(to, message):
+    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
+        print("WhatsApp configuration missing")
+        return None
+
+    url = (
+        f"https://graph.facebook.com/v23.0/"
+        f"{PHONE_NUMBER_ID}/messages"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "text",
+        "text": {
+            "preview_url": False,
+            "body": message,
+        },
+    }
+
+    response = requests.post(
+        url,
+        headers=headers,
+        json=payload,
+        timeout=15
+    )
+
+    print("WhatsApp send status:", response.status_code)
+    print("WhatsApp send response:", response.text)
+
+    return response
+
+
 @app.route("/webhook", methods=["POST"])
 def receive_webhook():
     data = request.get_json(silent=True) or {}
@@ -127,6 +196,21 @@ def receive_webhook():
         print("OpenAI analysis error:")
         print(str(e))
 
+    try:
+        reply = generate_customer_reply(message["text"])
+
+        print("Customer reply:")
+        print(reply)
+
+        send_whatsapp_message(
+            message["from"],
+            reply
+        )
+
+    except Exception as e:
+        print("Reply/send error:")
+        print(str(e))
+
     return "EVENT_RECEIVED", 200
 
 
@@ -134,7 +218,10 @@ def receive_webhook():
 def health():
     return jsonify({
         "status": "ok",
-        "openai_configured": bool(OPENAI_API_KEY)
+        "openai_configured": bool(OPENAI_API_KEY),
+        "whatsapp_configured": bool(
+            WHATSAPP_TOKEN and PHONE_NUMBER_ID
+        )
     }), 200
 
 
